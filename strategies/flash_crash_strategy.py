@@ -684,15 +684,12 @@ class FlashCrashStrategy:
     async def _get_prices_from_ws(self) -> Dict[str, float]:
         """Get current prices from WebSocket cache."""
         prices = {}
-        now = time.time()
         for side, token_id in self.token_ids.items():
             ob = self.ws.get_orderbook(token_id) if self.ws else None
             if ob and ob.mid_price > 0:
                 prices[side] = ob.mid_price
-                # Also record to price history for flash crash detection
-                self.price_history[side].append(
-                    PricePoint(timestamp=now, price=ob.mid_price, side=side)
-                )
+                # Note: price history is recorded in on_book_update callback
+                # to avoid duplicate entries
         return prices
 
     async def run(self) -> None:
@@ -749,10 +746,10 @@ class FlashCrashStrategy:
                                         # Switch to status mode after initial setup
                                         self._status_mode = True
                                         break
-                    # If market changed, resubscribe
+                    # If market changed, resubscribe with replace=True to clear old data
                     elif ws_initialized and self.ws and new_tokens != old_tokens:
                         self.log("Market changed, resubscribing to WebSocket...")
-                        await self.ws.subscribe(list(new_tokens))
+                        await self.ws.subscribe(list(new_tokens), replace=True)
 
                 # Get prices (from WebSocket or REST)
                 if self._ws_connected and self.ws:

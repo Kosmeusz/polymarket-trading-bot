@@ -311,18 +311,24 @@ class MarketWebSocket:
             if self._on_disconnect:
                 self._on_disconnect()
 
-    async def subscribe(self, asset_ids: List[str]) -> bool:
+    async def subscribe(self, asset_ids: List[str], replace: bool = False) -> bool:
         """
         Subscribe to market data for assets.
 
         Args:
             asset_ids: List of token IDs to subscribe to
+            replace: If True, replace existing subscriptions (clears old data)
 
         Returns:
             True if subscription sent successfully
         """
         if not asset_ids:
             return False
+
+        if replace:
+            # Clear old subscriptions and cached data
+            self._subscribed_assets.clear()
+            self._orderbooks.clear()
 
         self._subscribed_assets.update(asset_ids)
         logger.info(f"subscribe() called with {len(asset_ids)} assets, is_connected={self.is_connected}, ws={self._ws is not None}")
