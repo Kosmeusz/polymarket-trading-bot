@@ -34,6 +34,11 @@ from src.bot import TradingBot
 from src.websocket_client import OrderbookSnapshot
 
 
+class MarketChangeRestartRequested(Exception):
+    """Raised when market changes and bot restart is requested."""
+    pass
+
+
 @dataclass
 class StrategyConfig:
     """Base strategy configuration."""
@@ -249,6 +254,11 @@ class BaseStrategy(ABC):
             self._status_mode = True
 
             while self.running:
+                # Check if market manager requested a restart
+                if self.market.restart_requested:
+                    self.log("Market changed - restarting bot for clean state...", "warning")
+                    raise MarketChangeRestartRequested("Market changed, restart requested")
+
                 # Get current prices
                 prices = self._get_current_prices()
 
@@ -266,6 +276,10 @@ class BaseStrategy(ABC):
 
                 await asyncio.sleep(self.config.update_interval)
 
+        except MarketChangeRestartRequested:
+            # Don't catch this - let it propagate to trigger restart
+            await self.stop()
+            raise
         except KeyboardInterrupt:
             self.log("Strategy stopped by user")
         finally:

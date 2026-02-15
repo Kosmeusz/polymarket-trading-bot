@@ -332,7 +332,7 @@ class MarketWebSocket:
 
         Args:
             asset_ids: List of token IDs to subscribe to
-            replace: If True, replace existing subscriptions (clears old data)
+            replace: If True, replace existing subscriptions
 
         Returns:
             True if subscription sent successfully
@@ -341,7 +341,6 @@ class MarketWebSocket:
             return False
 
         if replace:
-            # Clear old subscriptions and cached data
             self._subscribed_assets.clear()
             self._orderbooks.clear()
 
@@ -353,6 +352,7 @@ class MarketWebSocket:
             logger.info("Not connected yet, will subscribe after connect")
             return True
 
+        # Subscribe to assets
         subscribe_msg = {
             "assets_ids": asset_ids,
             "type": "MARKET",
@@ -401,37 +401,15 @@ class MarketWebSocket:
             logger.error(f"Failed to subscribe: {e}")
             return False
 
-    async def unsubscribe(self, asset_ids: List[str]) -> bool:
-        """
-        Unsubscribe from assets.
 
-        Args:
-            asset_ids: Token IDs to unsubscribe from
-
-        Returns:
-            True if unsubscription sent successfully
-        """
-        if not self.is_connected or not asset_ids:
-            return False
-
-        self._subscribed_assets.difference_update(asset_ids)
-
-        unsubscribe_msg = {
-            "assets_ids": asset_ids,
-            "operation": "unsubscribe",
-        }
-
-        try:
-            await self._ws.send(json.dumps(unsubscribe_msg))
-            logger.info(f"Unsubscribed from {len(asset_ids)} assets")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to unsubscribe: {e}")
-            return False
 
     async def _handle_message(self, data: Dict[str, Any]) -> None:
         """Handle incoming WebSocket message."""
         event_type = data.get("event_type", "")
+        asset_id = data.get("asset_id", "")
+
+
+
         logger.debug(f"Received event: {event_type}, keys: {list(data.keys())}")
 
         if event_type == "book":
@@ -446,6 +424,7 @@ class MarketWebSocket:
                 PriceChange.from_dict(pc)
                 for pc in data.get("price_changes", [])
             ]
+
             await self._run_callback(
                 self._on_price_change,
                 market,
@@ -648,10 +627,6 @@ class OrderbookManager:
     async def subscribe(self, asset_ids: List[str]) -> bool:
         """Subscribe to additional assets."""
         return await self._ws.subscribe_more(asset_ids)
-
-    async def unsubscribe(self, asset_ids: List[str]) -> bool:
-        """Unsubscribe from assets."""
-        return await self._ws.unsubscribe(asset_ids)
 
     def stop(self) -> None:
         """Stop the manager."""

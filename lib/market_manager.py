@@ -182,6 +182,9 @@ class MarketManager:
         self._on_connect_callbacks: List[ConnectionCallback] = []
         self._on_disconnect_callbacks: List[ConnectionCallback] = []
 
+        # Restart flag
+        self._restart_requested: bool = False
+
     @property
     def is_connected(self) -> bool:
         """Check if WebSocket is connected."""
@@ -191,6 +194,11 @@ class MarketManager:
     def is_running(self) -> bool:
         """Check if manager is running."""
         return self._running
+
+    @property
+    def restart_requested(self) -> bool:
+        """Check if bot restart was requested due to market change."""
+        return self._restart_requested
 
     @property
     def token_ids(self) -> Dict[str, str]:
@@ -397,17 +405,23 @@ class MarketManager:
             if not self._should_switch_market(old_market, market):
                 continue
 
-            # Market changed - resubscribe to new tokens
-            await self.ws.subscribe(list(new_tokens), replace=True)
-            self._update_current_market(market)
+            # Market changed - trigger bot restart for clean slate
+            import sys
+            print(f"\n{'='*80}", file=sys.stderr, flush=True)
+            print(f"MARKET CHANGED: {old_slug} -> {market.slug}", file=sys.stderr, flush=True)
+            print(f"Triggering bot restart for clean WebSocket connection...", file=sys.stderr, flush=True)
+            print(f"{'='*80}\n", file=sys.stderr, flush=True)
 
-            # Fire market change callbacks in main thread
-            if old_slug and old_slug != market.slug:
-                for callback in self._on_market_change_callbacks:
-                    try:
-                        callback(old_slug, market.slug)
-                    except Exception:
-                        pass
+            # Set a flag that the strategy can check
+            self._restart_requested = True
+
+            # Stop the manager immediately to trigger restart
+            self._running = False
+
+            # Stop the market check loop
+            break
+
+
 
     async def start(self) -> bool:
         """
@@ -483,13 +497,14 @@ class MarketManager:
 
     async def refresh_market(self) -> Optional[MarketInfo]:
         """
-        Force refresh market discovery and resubscribe.
+        Force refresh market discovery.
 
         Returns:
             New MarketInfo if found
         """
         old_market = self.current_market
         old_tokens = set(old_market.token_ids.values()) if old_market else set()
+        old_slug = old_market.slug if old_market else None
 
         # Run synchronous HTTP call in thread pool to avoid blocking
         market = await asyncio.to_thread(self.discover_market, update_state=False)
@@ -505,8 +520,17 @@ class MarketManager:
         if not self._should_switch_market(old_market, market):
             return old_market
 
-        if self.ws:
-            await self.ws.subscribe(list(new_tokens), replace=True)
+        # Market changed - trigger bot restart for clean slate
+        import sys
+        print(f"\n{'='*80}", file=sys.stderr, flush=True)
+        print(f"MARKET CHANGED: {old_slug} -> {market.slug}", file=sys.stderr, flush=True)
+        print(f"Triggering bot restart for clean WebSocket connection...", file=sys.stderr, flush=True)
+        print(f"{'='*80}\n", file=sys.stderr, flush=True)
 
-        self._update_current_market(market)
+        # Set a flag that the strategy can check
+        self._restart_requested = True
+
+        # Stop the manager immediately to trigger restart
+        self._running = False
+
         return market

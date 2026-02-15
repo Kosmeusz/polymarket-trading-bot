@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from lib.console import Colors
 from src.bot import TradingBot
 from src.config import Config
+from strategies.base import MarketChangeRestartRequested
 from strategies.flash_crash import FlashCrashStrategy, FlashCrashConfig
 
 
@@ -136,6 +137,10 @@ def main():
 
     try:
         asyncio.run(strategy.run())
+    except MarketChangeRestartRequested:
+        # Market changed - exit with code 42 to trigger restart
+        print(f"\n{Colors.YELLOW}Market changed - requesting restart...{Colors.RESET}")
+        sys.exit(42)
     except KeyboardInterrupt:
         print("\nInterrupted")
     except Exception as e:
