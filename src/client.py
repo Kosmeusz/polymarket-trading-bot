@@ -32,6 +32,7 @@ import hmac
 import hashlib
 import base64
 import json
+import logging
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 
@@ -39,6 +40,8 @@ import requests
 
 from .config import BuilderConfig
 from .http import ThreadLocalSessionMixin
+
+logger = logging.getLogger(__name__)
 
 
 class ApiError(Exception):
@@ -114,7 +117,8 @@ class ApiClient(ThreadLocalSessionMixin):
         endpoint: str,
         data: Optional[Any] = None,
         headers: Optional[Dict] = None,
-        params: Optional[Dict] = None
+        params: Optional[Dict] = None,
+        use_json_param: bool = True
     ) -> Dict[str, Any]:
         """
         Make HTTP request with error handling.
@@ -122,9 +126,11 @@ class ApiClient(ThreadLocalSessionMixin):
         Args:
             method: HTTP method (GET, POST, etc.)
             endpoint: API endpoint
-            data: Request body data
+            data: Request body data (dict or JSON string)
             headers: Additional headers
             params: Query parameters
+            use_json_param: If True, use json= param (auto-serialize dict).
+                           If False, use data= param (send string as-is)
 
         Returns:
             Response JSON data
@@ -148,15 +154,29 @@ class ApiClient(ThreadLocalSessionMixin):
                         params=params, timeout=self.timeout
                     )
                 elif method.upper() == "POST":
-                    response = session.post(
-                        url, headers=request_headers,
-                        json=data, params=params, timeout=self.timeout
-                    )
+                    if use_json_param:
+                        # Auto-serialize dict to JSON
+                        response = session.post(
+                            url, headers=request_headers,
+                            json=data, params=params, timeout=self.timeout
+                        )
+                    else:
+                        # Send pre-serialized JSON string
+                        response = session.post(
+                            url, headers=request_headers,
+                            data=data, params=params, timeout=self.timeout
+                        )
                 elif method.upper() == "DELETE":
-                    response = session.delete(
-                        url, headers=request_headers,
-                        json=data, params=params, timeout=self.timeout
-                    )
+                    if use_json_param:
+                        response = session.delete(
+                            url, headers=request_headers,
+                            json=data, params=params, timeout=self.timeout
+                        )
+                    else:
+                        response = session.delete(
+                            url, headers=request_headers,
+                            data=data, params=params, timeout=self.timeout
+                        )
                 else:
                     raise ApiError(f"Unsupported method: {method}")
 
@@ -164,6 +184,13 @@ class ApiClient(ThreadLocalSessionMixin):
                 return response.json() if response.text else {}
 
             except requests.exceptions.RequestException as e:
+                # Log response body for debugging 400/401 errors
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        error_body = e.response.json()
+                        logger.error(f"HTTP {e.response.status_code} error: {error_body}")
+                    except:
+                        logger.error(f"HTTP {e.response.status_code} error: {e.response.text}")
                 last_error = e
                 if attempt < self.retry_count - 1:
                     time.sleep(2 ** attempt)  # Exponential backoff
@@ -198,7 +225,8 @@ class ClobClient(ApiClient):
         funder: str = "",
         api_creds: Optional[ApiCredentials] = None,
         builder_creds: Optional[BuilderConfig] = None,
-        timeout: int = 30
+        timeout: int = 30,
+        signer_address: str = None
     ):
         """
         Initialize CLOB client.
@@ -211,6 +239,7 @@ class ClobClient(ApiClient):
             api_creds: User API credentials (optional)
             builder_creds: Builder credentials for attribution (optional)
             timeout: Request timeout
+            signer_address: Signer's EOA address (required for L2 auth)
         """
         super().__init__(base_url=host, timeout=timeout)
         self.host = host
@@ -219,6 +248,7 @@ class ClobClient(ApiClient):
         self.funder = funder
         self.api_creds = api_creds
         self.builder_creds = builder_creds
+        self.signer_address = signer_address
 
     def _build_headers(
         self,
@@ -281,8 +311,11 @@ class ClobClient(ApiClient):
                     hashlib.sha256
                 ).hexdigest()
 
+            # CRITICAL: For L2 authentication, POLY_ADDRESS MUST ALWAYS be the signer's EOA address
+            # This is how the official Polymarket client works (see create_level_2_headers in headers.py)
+            # The funder (Proxy) address is only used in the order itself (owner/maker fields), NOT in headers
             headers.update({
-                "POLY_ADDRESS": self.funder,
+                "POLY_ADDRESS": self.signer_address,
                 "POLY_API_KEY": self.api_creds.api_key,
                 "POLY_TIMESTAMP": timestamp,
                 "POLY_PASSPHRASE": self.api_creds.passphrase,
@@ -308,11 +341,17 @@ class ClobClient(ApiClient):
         timestamp = str(int(time.time()))
 
         # Sign the auth message using EIP-712
+        # The message ALWAYS contains the signer's EOA address
+        # But for signature_type=1 (POLY_PROXY/Magic Link), the POLY_ADDRESS header uses the funder (Proxy) address
         auth_signature = signer.sign_auth_message(timestamp=timestamp, nonce=nonce)
 
         # L1 headers
+        # ALWAYS use EOA address in POLY_ADDRESS header (matching the signed message)
+        # This applies to all signature types, including signature_type=1
+        poly_address = signer.address
+
         headers = {
-            "POLY_ADDRESS": signer.address,
+            "POLY_ADDRESS": poly_address,
             "POLY_SIGNATURE": auth_signature,
             "POLY_TIMESTAMP": timestamp,
             "POLY_NONCE": str(nonce),
@@ -342,11 +381,16 @@ class ClobClient(ApiClient):
         timestamp = str(int(time.time()))
 
         # Sign the auth message using EIP-712
+        # The message ALWAYS contains the signer's EOA address
         auth_signature = signer.sign_auth_message(timestamp=timestamp, nonce=nonce)
 
         # L1 headers
+        # ALWAYS use EOA address in POLY_ADDRESS header (matching the signed message)
+        # This applies to all signature types, including signature_type=1
+        poly_address = signer.address
+
         headers = {
-            "POLY_ADDRESS": signer.address,
+            "POLY_ADDRESS": poly_address,
             "POLY_SIGNATURE": auth_signature,
             "POLY_TIMESTAMP": timestamp,
             "POLY_NONCE": str(nonce),
@@ -499,24 +543,32 @@ class ClobClient(ApiClient):
         endpoint = "/order"
 
         # Build request body
-        body = {
-            "order": signed_order.get("order", signed_order),
-            "owner": self.funder,
-            "orderType": order_type,
-        }
+        # IMPORTANT: "owner" field must be the API key, not the wallet address
+        # See: https://docs.polymarket.com/developers/CLOB/orders/create-order
+        if not self.api_creds or not self.api_creds.api_key:
+            raise ApiError("API credentials required to post orders. Call create_or_derive_api_key() first.")
 
-        # Add signature
-        if "signature" in signed_order:
-            body["signature"] = signed_order["signature"]
+        # The signed_order should have an "order" key with the full order object
+        # The signature is now inside the order object itself
+        # Match the format used by the Polymarket website
+        body = {
+            "deferExec": False,  # Added to match website behavior
+            "order": signed_order.get("order", signed_order),
+            "owner": self.api_creds.api_key,  # API key, not wallet address!
+            "orderType": order_type,
+            "postOnly": False,  # Added to match website behavior
+        }
 
         body_json = json.dumps(body, separators=(',', ':'))
         headers = self._build_headers("POST", endpoint, body_json)
 
+        # Send the pre-serialized JSON string to match the signature
         return self._request(
             "POST",
             endpoint,
-            data=body,
-            headers=headers
+            data=body_json,
+            headers=headers,
+            use_json_param=False  # Send as raw string, not dict
         )
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:

@@ -98,8 +98,9 @@ def main():
         print("Set them in .env file or export as environment variables")
         sys.exit(1)
 
-    # Create bot
-    config = Config.from_env()
+    # Create bot (load from config.yaml with env overrides)
+    config = Config.load_with_env("config.yaml")
+
     bot = TradingBot(config=config, private_key=private_key)
 
     if not bot.is_initialized():
@@ -139,8 +140,6 @@ def main():
         print("\nInterrupted")
     except Exception as e:
         print(f"\n{Colors.RED}Error: {e}{Colors.RESET}")
-        import traceback
-        traceback.print_exc()
         sys.exit(1)
 
 

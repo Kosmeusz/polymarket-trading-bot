@@ -317,19 +317,22 @@ class BaseStrategy(ABC):
             return False
 
         size = self.config.size / current_price
-        buy_price = min(current_price + 0.02, 0.99)
+        # Round price to minimum tick size (0.01)
+        buy_price = round(min(current_price + 0.02, 0.99), 2)
 
-        self.log(f"BUY {side.upper()} @ {current_price:.4f} size={size:.2f}", "trade")
+        self.log(f"BUY {side.upper()} @ {buy_price:.4f} size={size:.2f}", "trade")
 
         result = await self.bot.place_order(
             token_id=token_id,
             price=buy_price,
             size=size,
-            side="BUY"
+            side="BUY",
+            order_type="FOK",  # Fill-Or-Kill for immediate execution
+            fee_rate_bps=1000  # Standard Polymarket fee (10 basis points = 0.1%)
         )
 
-        if result.success:
-            self.log(f"Order placed: {result.order_id}", "success")
+        if result.success and result.status == "matched":
+            self.log(f"Order filled: {result.order_id}", "success")
             self.positions.open_position(
                 side=side,
                 token_id=token_id,
@@ -338,6 +341,9 @@ class BaseStrategy(ABC):
                 order_id=result.order_id,
             )
             return True
+        elif result.success:
+            self.log(f"Order placed but not filled (status: {result.status})", "warning")
+            return False
         else:
             self.log(f"Order failed: {result.message}", "error")
             return False
@@ -353,20 +359,27 @@ class BaseStrategy(ABC):
         Returns:
             True if order placed
         """
-        sell_price = max(current_price - 0.02, 0.01)
+        # Round price to minimum tick size (0.01)
+        sell_price = round(max(current_price - 0.02, 0.01), 2)
         pnl = position.get_pnl(current_price)
 
         result = await self.bot.place_order(
             token_id=position.token_id,
             price=sell_price,
             size=position.size,
-            side="SELL"
+            side="SELL",
+            order_type="FOK",  # Fill-Or-Kill for immediate execution
+            fee_rate_bps=1000  # Standard Polymarket fee (10 basis points = 0.1%)
         )
 
-        if result.success:
-            self.log(f"Sell order: {result.order_id} PnL: ${pnl:+.2f}", "success")
+        if result.success and result.status == "matched":
+            self.log(f"Sell filled: {result.order_id} PnL: ${pnl:+.2f}", "success")
             self.positions.close_position(position.id, realized_pnl=pnl)
             return True
+        elif result.success:
+            self.log(f"Sell placed but not filled (status: {result.status})", "warning")
+            # Keep position open since we didn't actually sell
+            return False
         else:
             self.log(f"Sell failed: {result.message}", "error")
             return False

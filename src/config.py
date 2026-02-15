@@ -107,7 +107,7 @@ class ClobConfig:
     """CLOB (Central Limit Order Book) configuration."""
     host: str = "https://clob.polymarket.com"
     chain_id: int = 137
-    signature_type: int = 2  # Gnosis Safe
+    signature_type: int = 1  # Magic Link / Email accounts (use 2 for MetaMask/Browser wallets)
 
     def is_valid(self) -> bool:
         """Validate CLOB configuration."""

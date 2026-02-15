@@ -47,6 +47,7 @@ class Order:
         nonce: Unique order nonce (usually timestamp)
         fee_rate_bps: Fee rate in basis points (usually 0)
         signature_type: Signature type (2 = Gnosis Safe)
+        order_type: Order type ('GTC', 'FOK', 'GTD') - affects decimal precision
     """
     token_id: str
     price: float
@@ -56,6 +57,7 @@ class Order:
     nonce: Optional[int] = None
     fee_rate_bps: int = 0
     signature_type: int = 2
+    order_type: str = "GTC"
 
     def __post_init__(self):
         """Validate and normalize order parameters."""
@@ -70,11 +72,46 @@ class Order:
             raise ValueError(f"Invalid size: {self.size}")
 
         if self.nonce is None:
-            self.nonce = int(time.time())
+            self.nonce = 0  # Use 0 as default nonce (matching website behavior)
+
+        # Round price to minimum tick size (0.01) first
+        self.price = round(self.price, 2)
 
         # Convert to integers for blockchain
-        self.maker_amount = str(int(self.size * self.price * 10**USDC_DECIMALS))
-        self.taker_amount = str(int(self.size * 10**USDC_DECIMALS))
+        # API requires different decimal precision for BUY vs SELL orders:
+        #
+        # BUY ORDERS (all types):
+        # - Limit (GTC, GTD): makerAmount (USDC) max 4 decimals, takerAmount (shares) max 2 decimals
+        # - Market (FOK, FAK): makerAmount (USDC) max 2 decimals, takerAmount (shares) max 4 decimals
+        #
+        # SELL ORDERS (all types):
+        # - All order types: makerAmount (shares) max 2 decimals, takerAmount (USDC) max 4 decimals
+        #
+        # IMPORTANT: We must ensure the implied price (makerAmount/takerAmount) matches the tick size
+        # Strategy: Round shares first, then calculate USDC amount from price to ensure consistency
+
+        is_market_order = self.order_type in ("FOK", "FAK")
+
+        if self.side == "BUY":
+            if is_market_order:
+                # Market BUY: USDC max 2 decimals, shares max 4 decimals
+                shares_amount = round(self.size, 4)
+                usdc_amount = round(shares_amount * self.price, 2)
+                self.maker_amount = str(int(round(usdc_amount * 10**2)) * 10**4)
+                self.taker_amount = str(int(round(shares_amount * 10**4)) * 10**2)
+            else:
+                # Limit BUY: USDC max 4 decimals, shares max 2 decimals
+                shares_amount = round(self.size, 2)
+                usdc_amount = round(shares_amount * self.price, 4)
+                self.maker_amount = str(int(round(usdc_amount * 10**4)) * 10**2)
+                self.taker_amount = str(int(round(shares_amount * 10**2)) * 10**4)
+        else:  # SELL
+            # ALL SELL orders: shares max 2 decimals, USDC max 4 decimals
+            shares_amount = round(self.size, 2)
+            usdc_amount = round(shares_amount * self.price, 4)
+            self.maker_amount = str(int(round(shares_amount * 10**2)) * 10**4)
+            self.taker_amount = str(int(round(usdc_amount * 10**4)) * 10**2)
+
         self.side_value = 0 if self.side == "BUY" else 1
 
 
@@ -97,11 +134,23 @@ class OrderSigner:
         domain: EIP-712 domain separator
     """
 
-    # Polymarket CLOB EIP-712 domain
-    DOMAIN = {
+    # Polymarket CLOB EIP-712 domain for authentication
+    AUTH_DOMAIN = {
         "name": "ClobAuthDomain",
         "version": "1",
         "chainId": 137,  # Polygon mainnet
+    }
+
+    # Backward compatibility alias
+    DOMAIN = AUTH_DOMAIN
+
+    # Polymarket CTF Exchange EIP-712 domain for orders
+    # Source: https://github.com/Polymarket/clob-order-utils
+    ORDER_DOMAIN = {
+        "name": "Polymarket CTF Exchange",
+        "version": "1",
+        "chainId": 137,  # Polygon mainnet
+        "verifyingContract": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",  # Exchange contract
     }
 
     # Order type definition for EIP-712
@@ -197,6 +246,8 @@ class OrderSigner:
             ]
         }
 
+        # The message ALWAYS contains the signer's EOA address
+        # This is consistent with Polymarket's official client
         message_data = {
             "address": self.address,
             "timestamp": timestamp,
@@ -205,7 +256,7 @@ class OrderSigner:
         }
 
         signable = encode_typed_data(
-            domain_data=self.DOMAIN,
+            domain_data=self.AUTH_DOMAIN,
             message_types=auth_types,
             message_data=message_data
         )
@@ -228,11 +279,18 @@ class OrderSigner:
         """
         try:
             # Build order message for EIP-712
+            # Use checksum addresses for EIP-712 signing
+            from eth_utils import to_checksum_address
+            import random
+
+            # Generate random salt (use smaller values like the website does)
+            salt = random.randint(1, 2**40 - 1)  # Smaller salt like website uses
+
             order_message = {
-                "salt": 0,
+                "salt": salt,
                 "maker": to_checksum_address(order.maker),
-                "signer": self.address,
-                "taker": "0x0000000000000000000000000000000000000000",
+                "signer": to_checksum_address(self.address),
+                "taker": to_checksum_address("0x0000000000000000000000000000000000000000"),
                 "tokenId": int(order.token_id),
                 "makerAmount": int(order.maker_amount),
                 "takerAmount": int(order.taker_amount),
@@ -244,27 +302,33 @@ class OrderSigner:
             }
 
             # Sign the order using new API format
+            # Use ORDER_DOMAIN which includes the Exchange contract address
             signable = encode_typed_data(
-                domain_data=self.DOMAIN,
+                domain_data=self.ORDER_DOMAIN,
                 message_types=self.ORDER_TYPES,
                 message_data=order_message
             )
 
             signed = self.wallet.sign_message(signable)
 
+            # Return the full EIP-712 order format expected by the API
+            # Match the format used by the Polymarket website
             return {
                 "order": {
-                    "tokenId": order.token_id,
-                    "price": order.price,
-                    "size": order.size,
-                    "side": order.side,
-                    "maker": order.maker,
-                    "nonce": order.nonce,
-                    "feeRateBps": order.fee_rate_bps,
-                    "signatureType": order.signature_type,
+                    "salt": order_message["salt"],  # integer
+                    "maker": order_message["maker"],
+                    "signer": order_message["signer"],
+                    "taker": order_message["taker"],
+                    "tokenId": str(order_message["tokenId"]),
+                    "makerAmount": str(order_message["makerAmount"]),
+                    "takerAmount": str(order_message["takerAmount"]),
+                    "expiration": str(order_message["expiration"]),
+                    "nonce": str(order_message["nonce"]),
+                    "feeRateBps": str(order_message["feeRateBps"]),
+                    "side": order.side,  # string: "BUY" or "SELL" (not numeric)
+                    "signatureType": order_message["signatureType"],  # integer
+                    "signature": "0x" + signed.signature.hex(),
                 },
-                "signature": "0x" + signed.signature.hex(),
-                "signer": self.address,
             }
 
         except Exception as e:

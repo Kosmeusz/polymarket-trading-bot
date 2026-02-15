@@ -236,11 +236,17 @@ class TradingBot:
 
         try:
             logger.info("Deriving L2 API credentials...")
-            self._api_creds = self.clob_client.create_or_derive_api_key(self.signer)
+            logger.info(f"Using signature_type={self.config.clob.signature_type}, funder={self.config.safe_address}")
+            # Use nonce=3 to create fresh credentials
+            # Previous nonces:
+            #   nonce=0: created with signature_type=0 (EOA) - SUCCESS
+            #   nonce=1: created with signature_type=0 (EOA) - SUCCESS
+            #   nonce=2: attempted with signature_type=1 (POLY_PROXY) - FAILED 401
+            self._api_creds = self.clob_client.create_or_derive_api_key(self.signer, nonce=3)
             self.clob_client.set_api_creds(self._api_creds)
-            logger.info("L2 API credentials derived successfully")
+            logger.info(f"L2 API credentials derived successfully (key: {self._api_creds.api_key[:20]}...)")
         except Exception as e:
-            logger.warning(f"Failed to derive API credentials: {e}")
+            logger.error(f"Failed to derive API credentials: {e}")
             logger.warning("Some API endpoints may not be accessible")
 
     def _init_clients(self) -> None:
@@ -253,6 +259,7 @@ class TradingBot:
             funder=self.config.safe_address,
             api_creds=self._api_creds,
             builder_creds=self.config.builder if self.config.use_gasless else None,
+            signer_address=self.signer.address if self.signer else None,
         )
 
         # Relayer client (for gasless)
@@ -319,6 +326,8 @@ class TradingBot:
                 side=side,
                 maker=self.config.safe_address,
                 fee_rate_bps=fee_rate_bps,
+                signature_type=self.config.clob.signature_type,  # Use signature type from config
+                order_type=order_type,  # Pass order type for correct decimal precision
             )
 
             # Sign order
